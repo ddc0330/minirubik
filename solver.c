@@ -8,7 +8,8 @@ enum {
     PERMUTATIONS = 5040,
     ORIENTATIONS = 729,
     STATES = PERMUTATIONS * ORIENTATIONS,
-    MOVES = 9
+    MOVES = 9,
+    MAX_DEPTH = 11
 };
 
 typedef struct {
@@ -283,6 +284,50 @@ static int check_heuristic_tables(void)
     return 1;
 }
 
+static uint8_t coordinate_heuristic(uint16_t p, uint16_t o)
+{
+    return perm_dist[p] > ori_dist[o] ? perm_dist[p] : ori_dist[o];
+}
+
+/* Return success only when a solution fits in the remaining depth.
+ * path is written on successful unwinding, so failed branches leave it alone.
+ */
+static int ida_search(uint16_t p, uint16_t o, uint8_t remaining,
+                      uint8_t previous_face, uint8_t depth, uint8_t *path)
+{
+    if (coordinate_heuristic(p, o) > remaining)
+        return 0;
+    if (p == 0 && o == 0)
+        return 1;
+    if (remaining == 0)
+        return 0;
+    for (uint8_t move = 0; move < MOVES; ++move) {
+        uint8_t face = (uint8_t) (move / 3U);
+        if (face == previous_face)
+            continue;
+        if (ida_search(perm_next[move][p], ori_next[move][o],
+                       (uint8_t) (remaining - 1U), face,
+                       (uint8_t) (depth + 1U), path)) {
+            path[depth] = move;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* The first successful bound is optimal because the heuristic is admissible.
+ * Same-face pairs can always be replaced by at most one move.
+ */
+static int solve_coordinates(uint16_t p, uint16_t o, uint8_t *path)
+{
+    for (uint8_t bound = coordinate_heuristic(p, o);
+         bound <= MAX_DEPTH; ++bound) {
+        if (ida_search(p, o, bound, 3, 0, path))
+            return bound;
+    }
+    return -1;
+}
+
 static uint8_t *build_table(uint8_t *diameter)
 {
     uint8_t *toward_solved = malloc(STATES);
@@ -460,19 +505,31 @@ int main(int argc, char **argv)
                 argc > 0 && argv[0] ? argv[0] : "solver");
         return 2;
     }
-    uint8_t *table = build_table(&diameter);
-    if (!table) {
-        fputs("could not build complete state table\n", stderr);
+    build_coordinate_tables();
+    if (!build_heuristic_tables()) {
+        fputs("could not build complete heuristic tables\n", stderr);
+        return 1;
+    }
+    uint8_t path[MAX_DEPTH];
+    uint32_t rank = rank_state(&state);
+    int length = solve_coordinates((uint16_t) (rank / ORIENTATIONS),
+                                   (uint16_t) (rank % ORIENTATIONS), path);
+    if (length < 0) {
+        fputs("IDA* search failed\n", stderr);
+        return 1;
+    }
+    /* Verify with the original cubie moves before emitting the solution. */
+    for (int i = 0; i < length; ++i)
+        state = apply_move(state, path[i]);
+    if (rank_state(&state) != 0) {
+        fputs("solution verification failed\n", stderr);
         return 1;
     }
     const char *separator = "";
-    for (uint32_t rank = rank_state(&state); rank; rank = rank_state(&state)) {
-        uint8_t move = table[rank];
-        printf("%s%s", separator, move_names[move]);
+    for (int i = 0; i < length; ++i) {
+        printf("%s%s", separator, move_names[path[i]]);
         separator = " ";
-        state = apply_move(state, move);
     }
     putchar('\n');
-    free(table);
     return output_failed();
 }
