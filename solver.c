@@ -2,6 +2,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if defined(SOLVER_GENERATE_TABLES) && defined(SOLVER_HOST_VERIFY)
+#error "Build the generator and host verifier separately"
+#endif
 #ifdef SOLVER_STATS
 #include <inttypes.h>
 typedef struct {
@@ -37,6 +40,10 @@ typedef struct {
     uint8_t p[CUBIES], o[CUBIES];
 } state_t;
 
+typedef struct {
+    uint16_t p, o;
+} coordinates_t;
+
 /*@ predicate valid_state(state_t *state) =
       (\forall integer i; 0 <= i < CUBIES ==>
          state->p[i] < CUBIES && state->o[i] < 3) &&
@@ -63,20 +70,57 @@ static const uint8_t twist[3][CUBIES] = {
     {0, 0, 0, 0, 0, 0, 0},
 };
 
-/* Coordinate transitions for all nine moves; initialized before use. */
+/* Writable scratch tables exist only in host generator/verification builds. */
+#if defined(SOLVER_GENERATE_TABLES) || defined(SOLVER_HOST_VERIFY)
 #ifdef SOLVER_STATE_MAJOR
 static uint16_t perm_next[PERMUTATIONS][MOVES];
 static uint16_t ori_next[ORIENTATIONS][MOVES];
-#define PERM_NEXT(move, p) (perm_next[(p)][(move)])
-#define ORI_NEXT(move, o) (ori_next[(o)][(move)])
 #else
 static uint16_t perm_next[MOVES][PERMUTATIONS];
 static uint16_t ori_next[MOVES][ORIENTATIONS];
-#define PERM_NEXT(move, p) (perm_next[(move)][(p)])
-#define ORI_NEXT(move, o) (ori_next[(move)][(o)])
 #endif
 static uint8_t perm_dist[PERMUTATIONS];
 static uint8_t ori_dist[ORIENTATIONS];
+#else
+#include "solver_tables.inc"
+#endif
+
+#ifdef SOLVER_STATE_MAJOR
+#define PERM_NEXT(move, p) (perm_next[(p)][(move)])
+#define ORI_NEXT(move, o) (ori_next[(o)][(move)])
+#else
+#define PERM_NEXT(move, p) (perm_next[(move)][(p)])
+#define ORI_NEXT(move, o) (ori_next[(move)][(o)])
+#endif
+
+#ifdef SOLVER_HOST_VERIFY
+/* Verify regenerated scratch tables, but search the linked constants. */
+#define perm_next linked_perm_next
+#define ori_next linked_ori_next
+#define perm_dist linked_perm_dist
+#define ori_dist linked_ori_dist
+#include "solver_tables.inc"
+#undef perm_next
+#undef ori_next
+#undef perm_dist
+#undef ori_dist
+#define SEARCH_PERM_TABLE linked_perm_next
+#define SEARCH_ORI_TABLE linked_ori_next
+#define SEARCH_PERM_DIST linked_perm_dist
+#define SEARCH_ORI_DIST linked_ori_dist
+#else
+#define SEARCH_PERM_TABLE perm_next
+#define SEARCH_ORI_TABLE ori_next
+#define SEARCH_PERM_DIST perm_dist
+#define SEARCH_ORI_DIST ori_dist
+#endif
+#ifdef SOLVER_STATE_MAJOR
+#define SEARCH_PERM_NEXT(move, p) (SEARCH_PERM_TABLE[(p)][(move)])
+#define SEARCH_ORI_NEXT(move, o) (SEARCH_ORI_TABLE[(o)][(move)])
+#else
+#define SEARCH_PERM_NEXT(move, p) (SEARCH_PERM_TABLE[(move)][(p)])
+#define SEARCH_ORI_NEXT(move, o) (SEARCH_ORI_TABLE[(move)][(o)])
+#endif
 
 /* The three quarter-turns preserve the fixed front-upper-left corner. */
 /*@ requires face < 3;
@@ -121,9 +165,9 @@ static state_t apply_move(state_t state, uint8_t move)
     requires \forall integer i; 0 <= i < CUBIES ==>
       0 <= state->o[i] < 3;
     assigns \nothing;
-    ensures \result < STATES;
+    ensures \result.p < PERMUTATIONS && \result.o < ORIENTATIONS;
  */
-static uint32_t rank_state(const state_t *state)
+static coordinates_t rank_coordinates(const state_t *state)
 {
     uint32_t p = 0, o = 0;
     /*@ loop invariant 0 <= i <= CUBIES;
@@ -156,7 +200,14 @@ static uint32_t rank_state(const state_t *state)
      */
     for (uint8_t i = 0; i < 6; ++i)
         o = o * 3U + state->o[i];
-    return p * ORIENTATIONS + o;
+    return (coordinates_t) {(uint16_t) p, (uint16_t) o};
+}
+
+#if defined(SOLVER_GENERATE_TABLES) || defined(SOLVER_HOST_VERIFY)
+static uint32_t rank_state(const state_t *state)
+{
+    coordinates_t c = rank_coordinates(state);
+    return (uint32_t) c.p * ORIENTATIONS + c.o;
 }
 
 /*@ requires \valid(state); requires rank < STATES; assigns *state; */
@@ -181,6 +232,7 @@ static void unrank_state(uint32_t rank, state_t *state)
     }
     state->o[6] = (uint8_t) ((3U - sum % 3U) % 3U);
 }
+#endif
 
 /*@ requires \valid_read(state);
     requires \initialized(&state->p[0..6]) && \initialized(&state->o[0..6]);
@@ -227,6 +279,7 @@ static int valid(const state_t *state)
     return sum % 3U == 0;
 }
 
+#if defined(SOLVER_GENERATE_TABLES) || defined(SOLVER_HOST_VERIFY)
 static void build_coordinate_tables(void)
 {
     state_t state;
@@ -288,10 +341,16 @@ static int build_heuristic_tables(void)
     }
     return tail == ORIENTATIONS;
 }
+#endif
 
 #ifdef SOLVER_HOST_VERIFY
 static int check_heuristic_tables(void)
 {
+    if (memcmp(perm_next, linked_perm_next, sizeof perm_next) ||
+        memcmp(ori_next, linked_ori_next, sizeof ori_next) ||
+        memcmp(perm_dist, linked_perm_dist, sizeof perm_dist) ||
+        memcmp(ori_dist, linked_ori_dist, sizeof ori_dist))
+        return 0;
     if (perm_dist[0] != 0 || ori_dist[0] != 0)
         return 0;
     for (uint16_t p = 0; p < PERMUTATIONS; ++p) {
@@ -320,7 +379,8 @@ static int check_heuristic_tables(void)
 
 static uint8_t coordinate_heuristic(uint16_t p, uint16_t o)
 {
-    return perm_dist[p] > ori_dist[o] ? perm_dist[p] : ori_dist[o];
+    return SEARCH_PERM_DIST[p] > SEARCH_ORI_DIST[o] ?
+           SEARCH_PERM_DIST[p] : SEARCH_ORI_DIST[o];
 }
 
 #ifndef SOLVER_ITERATIVE
@@ -339,8 +399,8 @@ static int ida_search(uint16_t p, uint16_t o, uint8_t remaining,
     COUNT(expanded);
     uint8_t child_remaining = (uint8_t) (remaining - 1U);
 #ifdef SOLVER_STATE_MAJOR
-    const uint16_t *perm_row = perm_next[p];
-    const uint16_t *ori_row = ori_next[o];
+    const uint16_t *perm_row = SEARCH_PERM_TABLE[p];
+    const uint16_t *ori_row = SEARCH_ORI_TABLE[o];
 #endif
     for (uint8_t face = 0; face < 3; ++face) {
         if (face == previous_face)
@@ -353,8 +413,8 @@ static int ida_search(uint16_t p, uint16_t o, uint8_t remaining,
             uint16_t next_p = perm_row[move];
             uint16_t next_o = ori_row[move];
 #else
-            uint16_t next_p = PERM_NEXT(move, p);
-            uint16_t next_o = ORI_NEXT(move, o);
+            uint16_t next_p = SEARCH_PERM_NEXT(move, p);
+            uint16_t next_o = SEARCH_ORI_NEXT(move, o);
 #endif
             if (coordinate_heuristic(next_p, next_o) > child_remaining) {
                 COUNT(heuristic_prunes);
@@ -405,8 +465,8 @@ static int ida_search_iterative(uint16_t p, uint16_t o, uint8_t bound,
         }
         ++frame->next_move;
         COUNT(generated);
-        uint16_t next_p = PERM_NEXT(move, frame->p);
-        uint16_t next_o = ORI_NEXT(move, frame->o);
+        uint16_t next_p = SEARCH_PERM_NEXT(move, frame->p);
+        uint16_t next_o = SEARCH_ORI_NEXT(move, frame->o);
         uint8_t child_remaining = (uint8_t) (bound - depth - 1U);
         if (coordinate_heuristic(next_p, next_o) > child_remaining) {
             COUNT(heuristic_prunes);
@@ -657,6 +717,64 @@ static int check_baseline(const uint8_t *distance)
 }
 #endif
 
+#ifdef SOLVER_GENERATE_TABLES
+/* Emit both existing layouts; preprocessing retains only the selected one.
+ * This mode does not include the output file, so it can bootstrap from source.
+ */
+static void emit_transitions(const char *name, unsigned count,
+                             int permutation, int state_major)
+{
+    printf("static const uint16_t %s[%u][%u] = {\n", name,
+           state_major ? count : MOVES, state_major ? MOVES : count);
+    unsigned rows = state_major ? count : MOVES;
+    unsigned columns = state_major ? MOVES : count;
+    for (unsigned row = 0; row < rows; ++row) {
+        fputs("    {", stdout);
+        for (unsigned column = 0; column < columns; ++column) {
+            unsigned coordinate = state_major ? row : column;
+            unsigned move = state_major ? column : row;
+            unsigned value = permutation ? PERM_NEXT(move, coordinate) :
+                                           ORI_NEXT(move, coordinate);
+            printf("%s%u", column ? ", " : "", value);
+        }
+        fputs("},\n", stdout);
+    }
+    fputs("};\n", stdout);
+}
+
+static void emit_distances(const char *name, const uint8_t *table,
+                           unsigned count)
+{
+    printf("static const uint8_t %s[%u] = {\n", name, count);
+    for (unsigned i = 0; i < count; ++i) {
+        if (i % 24U == 0)
+            fputs("    ", stdout);
+        printf("%u,", table[i]);
+        fputs(i % 24U == 23U || i + 1U == count ? "\n" : " ", stdout);
+    }
+    fputs("};\n", stdout);
+}
+
+int main(void)
+{
+    build_coordinate_tables();
+    if (!build_heuristic_tables()) {
+        fputs("could not generate complete heuristic tables\n", stderr);
+        return 1;
+    }
+    fputs("/* Generated by solver.c with SOLVER_GENERATE_TABLES. */\n"
+          "#ifdef SOLVER_STATE_MAJOR\n", stdout);
+    emit_transitions("perm_next", PERMUTATIONS, 1, 1);
+    emit_transitions("ori_next", ORIENTATIONS, 0, 1);
+    fputs("#else\n", stdout);
+    emit_transitions("perm_next", PERMUTATIONS, 1, 0);
+    emit_transitions("ori_next", ORIENTATIONS, 0, 0);
+    fputs("#endif\n", stdout);
+    emit_distances("perm_dist", perm_dist, PERMUTATIONS);
+    emit_distances("ori_dist", ori_dist, ORIENTATIONS);
+    return output_failed();
+}
+#else
 int main(int argc, char **argv)
 {
     state_t state;
@@ -685,7 +803,8 @@ int main(int argc, char **argv)
         free(table);
         puts("3674160 states; diameter 11; admissibility checked; "
              "all 3674160 optimal solutions replayed; "
-             "2644 distance-11 states and test vector verified");
+             "2644 distance-11 states and test vector verified; "
+             "linked constants match regenerated tables");
         return output_failed();
     }
 #endif
@@ -695,17 +814,18 @@ int main(int argc, char **argv)
                 argc > 0 && argv[0] ? argv[0] : "solver");
         return 2;
     }
+#ifdef SOLVER_HOST_VERIFY
     build_coordinate_tables();
-    if (!build_heuristic_tables()) {
-        fputs("could not build complete heuristic tables\n", stderr);
+    if (!build_heuristic_tables() || !check_heuristic_tables()) {
+        fputs("heuristic table check failed\n", stderr);
         return 1;
     }
+#endif
     uint8_t path[MAX_DEPTH];
-    uint32_t rank = rank_state(&state);
-    int length = solve_coordinates((uint16_t) (rank / ORIENTATIONS),
-                                   (uint16_t) (rank % ORIENTATIONS), path);
+    coordinates_t coordinates = rank_coordinates(&state);
+    int length = solve_coordinates(coordinates.p, coordinates.o, path);
 #ifdef SOLVER_STATS
-    report_stats(rank);
+    report_stats((uint32_t) coordinates.p * ORIENTATIONS + coordinates.o);
 #endif
     if (length < 0) {
         fputs("IDA* search failed\n", stderr);
@@ -714,7 +834,8 @@ int main(int argc, char **argv)
     /* Verify with the original cubie moves before emitting the solution. */
     for (int i = 0; i < length; ++i)
         state = apply_move(state, path[i]);
-    if (rank_state(&state) != 0) {
+    coordinates = rank_coordinates(&state);
+    if (coordinates.p != 0 || coordinates.o != 0) {
         fputs("solution verification failed\n", stderr);
         return 1;
     }
@@ -726,3 +847,4 @@ int main(int argc, char **argv)
     putchar('\n');
     return output_failed();
 }
+#endif
