@@ -64,8 +64,17 @@ static const uint8_t twist[3][CUBIES] = {
 };
 
 /* Coordinate transitions for all nine moves; initialized before use. */
+#ifdef SOLVER_STATE_MAJOR
+static uint16_t perm_next[PERMUTATIONS][MOVES];
+static uint16_t ori_next[ORIENTATIONS][MOVES];
+#define PERM_NEXT(move, p) (perm_next[(p)][(move)])
+#define ORI_NEXT(move, o) (ori_next[(o)][(move)])
+#else
 static uint16_t perm_next[MOVES][PERMUTATIONS];
 static uint16_t ori_next[MOVES][ORIENTATIONS];
+#define PERM_NEXT(move, p) (perm_next[(move)][(p)])
+#define ORI_NEXT(move, o) (ori_next[(move)][(o)])
+#endif
 static uint8_t perm_dist[PERMUTATIONS];
 static uint8_t ori_dist[ORIENTATIONS];
 
@@ -225,7 +234,7 @@ static void build_coordinate_tables(void)
         unrank_state((uint32_t) p * ORIENTATIONS, &state);
         for (uint8_t move = 0; move < MOVES; ++move) {
             state_t next = apply_move(state, move);
-            perm_next[move][p] =
+            PERM_NEXT(move, p) =
                 (uint16_t) (rank_state(&next) / ORIENTATIONS);
         }
     }
@@ -233,7 +242,7 @@ static void build_coordinate_tables(void)
         unrank_state(o, &state);
         for (uint8_t move = 0; move < MOVES; ++move) {
             state_t next = apply_move(state, move);
-            ori_next[move][o] =
+            ORI_NEXT(move, o) =
                 (uint16_t) (rank_state(&next) % ORIENTATIONS);
         }
     }
@@ -252,7 +261,7 @@ static int build_heuristic_tables(void)
     while (head < tail) {
         uint16_t here = queue[head++];
         for (uint8_t move = 0; move < MOVES; ++move) {
-            uint16_t there = perm_next[move][here];
+            uint16_t there = PERM_NEXT(move, here);
             if (perm_dist[there] == UINT8_MAX) {
                 perm_dist[there] = (uint8_t) (perm_dist[here] + 1U);
                 queue[tail++] = there;
@@ -270,7 +279,7 @@ static int build_heuristic_tables(void)
     while (head < tail) {
         uint16_t here = queue[head++];
         for (uint8_t move = 0; move < MOVES; ++move) {
-            uint16_t there = ori_next[move][here];
+            uint16_t there = ORI_NEXT(move, here);
             if (ori_dist[there] == UINT8_MAX) {
                 ori_dist[there] = (uint8_t) (ori_dist[here] + 1U);
                 queue[tail++] = there;
@@ -289,7 +298,7 @@ static int check_heuristic_tables(void)
         if (perm_dist[p] == UINT8_MAX || (p != 0 && perm_dist[p] == 0))
             return 0;
         for (uint8_t move = 0; move < MOVES; ++move) {
-            uint8_t next = perm_dist[perm_next[move][p]];
+            uint8_t next = perm_dist[PERM_NEXT(move, p)];
             if ((unsigned) next > (unsigned) perm_dist[p] + 1U ||
                 (unsigned) perm_dist[p] > (unsigned) next + 1U)
                 return 0;
@@ -299,7 +308,7 @@ static int check_heuristic_tables(void)
         if (ori_dist[o] == UINT8_MAX || (o != 0 && ori_dist[o] == 0))
             return 0;
         for (uint8_t move = 0; move < MOVES; ++move) {
-            uint8_t next = ori_dist[ori_next[move][o]];
+            uint8_t next = ori_dist[ORI_NEXT(move, o)];
             if ((unsigned) next > (unsigned) ori_dist[o] + 1U ||
                 (unsigned) ori_dist[o] > (unsigned) next + 1U)
                 return 0;
@@ -328,6 +337,10 @@ static int ida_search(uint16_t p, uint16_t o, uint8_t remaining,
         return 0;
     COUNT(expanded);
     uint8_t child_remaining = (uint8_t) (remaining - 1U);
+#ifdef SOLVER_STATE_MAJOR
+    const uint16_t *perm_row = perm_next[p];
+    const uint16_t *ori_row = ori_next[o];
+#endif
     for (uint8_t face = 0; face < 3; ++face) {
         if (face == previous_face)
             continue;
@@ -335,8 +348,13 @@ static int ida_search(uint16_t p, uint16_t o, uint8_t remaining,
         for (uint8_t turn = 0; turn < 3; ++turn) {
             uint8_t move = (uint8_t) (first_move + turn);
             COUNT(generated);
-            uint16_t next_p = perm_next[move][p];
-            uint16_t next_o = ori_next[move][o];
+#ifdef SOLVER_STATE_MAJOR
+            uint16_t next_p = perm_row[move];
+            uint16_t next_o = ori_row[move];
+#else
+            uint16_t next_p = PERM_NEXT(move, p);
+            uint16_t next_o = ORI_NEXT(move, o);
+#endif
             if (coordinate_heuristic(next_p, next_o) > child_remaining) {
                 COUNT(heuristic_prunes);
                 continue;
@@ -507,12 +525,12 @@ static int self_test(void)
         uint16_t p = (uint16_t) (rank / ORIENTATIONS);
         uint16_t o = (uint16_t) (rank % ORIENTATIONS);
         for (uint8_t move = 0; move < MOVES; ++move) {
-            uint16_t next_p = perm_next[move][p];
-            uint16_t next_o = ori_next[move][o];
+            uint16_t next_p = PERM_NEXT(move, p);
+            uint16_t next_o = ORI_NEXT(move, o);
             if (next_p >= PERMUTATIONS || next_o >= ORIENTATIONS)
                 return 0;
-            if (perm_next[inverse_move[move]][next_p] != p ||
-                ori_next[inverse_move[move]][next_o] != o)
+            if (PERM_NEXT(inverse_move[move], next_p) != p ||
+                ORI_NEXT(inverse_move[move], next_o) != o)
                 return 0;
             state_t next = apply_move(state, move);
             if (rank_state(&next) !=
