@@ -323,6 +323,7 @@ static uint8_t coordinate_heuristic(uint16_t p, uint16_t o)
     return perm_dist[p] > ori_dist[o] ? perm_dist[p] : ori_dist[o];
 }
 
+#ifndef SOLVER_ITERATIVE
 /* Entry requires coordinate_heuristic(p, o) <= remaining: the root bound
  * and the parent check establish this. Pruned children need no recursive call.
  * Return success only when a solution fits in the remaining depth.
@@ -368,6 +369,63 @@ static int ida_search(uint16_t p, uint16_t o, uint8_t remaining,
     }
     return 0;
 }
+#else
+typedef struct {
+    uint16_t p, o;
+    uint8_t next_move, previous_face, incoming_move;
+} search_frame_t;
+
+/* Frames hold only children that passed the heuristic check.
+ * next_move is the parent's continuation when a child finishes unsuccessfully.
+ */
+static int ida_search_iterative(uint16_t p, uint16_t o, uint8_t bound,
+                                uint8_t *path)
+{
+    search_frame_t frames[MAX_DEPTH + 1];
+    uint8_t depth = 0;
+    frames[0] = (search_frame_t) {p, o, 0, 3, 0};
+    if (p == 0 && o == 0)
+        return 1;
+    if (bound == 0)
+        return 0;
+    COUNT(expanded);
+    for (;;) {
+        search_frame_t *frame = &frames[depth];
+        if (frame->next_move == MOVES) {
+            if (depth == 0)
+                return 0;
+            --depth;
+            continue;
+        }
+        uint8_t move = frame->next_move;
+        uint8_t face = (uint8_t) (move / 3U);
+        if (face == frame->previous_face) {
+            frame->next_move = (uint8_t) (move + 3U);
+            continue;
+        }
+        ++frame->next_move;
+        COUNT(generated);
+        uint16_t next_p = PERM_NEXT(move, frame->p);
+        uint16_t next_o = ORI_NEXT(move, frame->o);
+        uint8_t child_remaining = (uint8_t) (bound - depth - 1U);
+        if (coordinate_heuristic(next_p, next_o) > child_remaining) {
+            COUNT(heuristic_prunes);
+            continue;
+        }
+        if (next_p == 0 && next_o == 0) {
+            for (uint8_t i = 0; i < depth; ++i)
+                path[i] = frames[i + 1U].incoming_move;
+            path[depth] = move;
+            return 1;
+        }
+        if (child_remaining == 0)
+            continue;
+        ++depth;
+        frames[depth] = (search_frame_t) {next_p, next_o, 0, face, move};
+        COUNT(expanded);
+    }
+}
+#endif
 
 /* The first successful bound is optimal because the heuristic is admissible.
  * Same-face pairs can always be replaced by at most one move.
@@ -381,7 +439,12 @@ static int solve_coordinates(uint16_t p, uint16_t o, uint8_t *path)
     for (uint8_t bound = coordinate_heuristic(p, o);
          bound <= MAX_DEPTH; ++bound) {
         COUNT(iterations);
-        if (ida_search(p, o, bound, 3, 0, path)) {
+#ifdef SOLVER_ITERATIVE
+        int found = ida_search_iterative(p, o, bound, path);
+#else
+        int found = ida_search(p, o, bound, 3, 0, path);
+#endif
+        if (found) {
 #ifdef SOLVER_STATS
             search_stats.solution_depth = bound;
 #endif
