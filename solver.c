@@ -329,16 +329,19 @@ static int ida_search(uint16_t p, uint16_t o, uint8_t remaining,
     if (remaining == 0)
         return 0;
     COUNT(expanded);
-    for (uint8_t move = 0; move < MOVES; ++move) {
-        uint8_t face = (uint8_t) (move / 3U);
+    for (uint8_t face = 0; face < 3; ++face) {
         if (face == previous_face)
             continue;
-        COUNT(generated);
-        if (ida_search(perm_next[move][p], ori_next[move][o],
-                       (uint8_t) (remaining - 1U), face,
-                       (uint8_t) (depth + 1U), path)) {
-            path[depth] = move;
-            return 1;
+        uint8_t first_move = (uint8_t) (face * 3U);
+        for (uint8_t turn = 0; turn < 3; ++turn) {
+            uint8_t move = (uint8_t) (first_move + turn);
+            COUNT(generated);
+            if (ida_search(perm_next[move][p], ori_next[move][o],
+                           (uint8_t) (remaining - 1U), face,
+                           (uint8_t) (depth + 1U), path)) {
+                path[depth] = move;
+                return 1;
+            }
         }
     }
     return 0;
