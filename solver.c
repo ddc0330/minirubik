@@ -42,6 +42,8 @@ static const uint8_t twist[3][CUBIES] = {
 /* Coordinate transitions for all nine moves; initialized before use. */
 static uint16_t perm_next[MOVES][PERMUTATIONS];
 static uint16_t ori_next[MOVES][ORIENTATIONS];
+static uint8_t perm_dist[PERMUTATIONS];
+static uint8_t ori_dist[ORIENTATIONS];
 
 /* The three quarter-turns preserve the fixed front-upper-left corner. */
 /*@ requires face < 3;
@@ -213,6 +215,74 @@ static void build_coordinate_tables(void)
     }
 }
 
+/* Shared scratch queue on the stack, sized for the larger abstraction.
+ * It is needed only during initialization, never during the search.
+ */
+static int build_heuristic_tables(void)
+{
+    uint16_t queue[PERMUTATIONS];
+    uint16_t head = 0, tail = 1;
+    memset(perm_dist, UINT8_MAX, sizeof perm_dist);
+    perm_dist[0] = 0;
+    queue[0] = 0;
+    while (head < tail) {
+        uint16_t here = queue[head++];
+        for (uint8_t move = 0; move < MOVES; ++move) {
+            uint16_t there = perm_next[move][here];
+            if (perm_dist[there] == UINT8_MAX) {
+                perm_dist[there] = (uint8_t) (perm_dist[here] + 1U);
+                queue[tail++] = there;
+            }
+        }
+    }
+    if (tail != PERMUTATIONS)
+        return 0;
+
+    head = 0;
+    tail = 1;
+    memset(ori_dist, UINT8_MAX, sizeof ori_dist);
+    ori_dist[0] = 0;
+    queue[0] = 0;
+    while (head < tail) {
+        uint16_t here = queue[head++];
+        for (uint8_t move = 0; move < MOVES; ++move) {
+            uint16_t there = ori_next[move][here];
+            if (ori_dist[there] == UINT8_MAX) {
+                ori_dist[there] = (uint8_t) (ori_dist[here] + 1U);
+                queue[tail++] = there;
+            }
+        }
+    }
+    return tail == ORIENTATIONS;
+}
+
+static int check_heuristic_tables(void)
+{
+    if (perm_dist[0] != 0 || ori_dist[0] != 0)
+        return 0;
+    for (uint16_t p = 0; p < PERMUTATIONS; ++p) {
+        if (perm_dist[p] == UINT8_MAX || (p != 0 && perm_dist[p] == 0))
+            return 0;
+        for (uint8_t move = 0; move < MOVES; ++move) {
+            uint8_t next = perm_dist[perm_next[move][p]];
+            if ((unsigned) next > (unsigned) perm_dist[p] + 1U ||
+                (unsigned) perm_dist[p] > (unsigned) next + 1U)
+                return 0;
+        }
+    }
+    for (uint16_t o = 0; o < ORIENTATIONS; ++o) {
+        if (ori_dist[o] == UINT8_MAX || (o != 0 && ori_dist[o] == 0))
+            return 0;
+        for (uint8_t move = 0; move < MOVES; ++move) {
+            uint8_t next = ori_dist[ori_next[move][o]];
+            if ((unsigned) next > (unsigned) ori_dist[o] + 1U ||
+                (unsigned) ori_dist[o] > (unsigned) next + 1U)
+                return 0;
+        }
+    }
+    return 1;
+}
+
 static uint8_t *build_table(uint8_t *diameter)
 {
     uint8_t *toward_solved = malloc(STATES);
@@ -363,6 +433,10 @@ int main(int argc, char **argv)
     uint8_t diameter;
     if (argc == 2 && !strcmp(argv[1], "--self-test")) {
         build_coordinate_tables();
+        if (!build_heuristic_tables() || !check_heuristic_tables()) {
+            fputs("heuristic table check failed\n", stderr);
+            return 1;
+        }
         if (!self_test()) {
             fputs("self-test failed\n", stderr);
             return 1;
