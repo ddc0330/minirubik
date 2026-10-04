@@ -641,11 +641,11 @@ static int check_baseline(const uint8_t *distance)
         }
         if (distance[rank] == MAX_DEPTH) {
             ++hardest;
-            if (!check_solution(rank, distance[rank])) {
-                fprintf(stderr, "solution check failed at rank %u\n",
-                        (unsigned) rank);
-                return 0;
-            }
+        }
+        if (!check_solution(rank, distance[rank])) {
+            fprintf(stderr, "solution check failed at rank %u\n",
+                    (unsigned) rank);
+            return 0;
         }
     }
     state_t vector;
@@ -684,7 +684,8 @@ int main(int argc, char **argv)
         }
         free(table);
         puts("3674160 states; diameter 11; admissibility checked; "
-             "2644 distance-11 solutions and test vector verified");
+             "all 3674160 optimal solutions replayed; "
+             "2644 distance-11 states and test vector verified");
         return output_failed();
     }
 #endif
