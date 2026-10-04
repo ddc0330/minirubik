@@ -39,6 +39,10 @@ static const uint8_t twist[3][CUBIES] = {
     {0, 0, 0, 0, 0, 0, 0},
 };
 
+/* Coordinate transitions for all nine moves; initialized before use. */
+static uint16_t perm_next[MOVES][PERMUTATIONS];
+static uint16_t ori_next[MOVES][ORIENTATIONS];
+
 /* The three quarter-turns preserve the fixed front-upper-left corner. */
 /*@ requires face < 3;
     assigns \nothing;
@@ -188,6 +192,27 @@ static int valid(const state_t *state)
     return sum % 3U == 0;
 }
 
+static void build_coordinate_tables(void)
+{
+    state_t state;
+    for (uint16_t p = 0; p < PERMUTATIONS; ++p) {
+        unrank_state((uint32_t) p * ORIENTATIONS, &state);
+        for (uint8_t move = 0; move < MOVES; ++move) {
+            state_t next = apply_move(state, move);
+            perm_next[move][p] =
+                (uint16_t) (rank_state(&next) / ORIENTATIONS);
+        }
+    }
+    for (uint16_t o = 0; o < ORIENTATIONS; ++o) {
+        unrank_state(o, &state);
+        for (uint8_t move = 0; move < MOVES; ++move) {
+            state_t next = apply_move(state, move);
+            ori_next[move][o] =
+                (uint16_t) (rank_state(&next) % ORIENTATIONS);
+        }
+    }
+}
+
 static uint8_t *build_table(uint8_t *diameter)
 {
     uint8_t *toward_solved = malloc(STATES);
@@ -313,6 +338,21 @@ static int self_test(void)
         unrank_state(rank, &state);
         if (!valid(&state) || rank_state(&state) != rank)
             return 0;
+        uint16_t p = (uint16_t) (rank / ORIENTATIONS);
+        uint16_t o = (uint16_t) (rank % ORIENTATIONS);
+        for (uint8_t move = 0; move < MOVES; ++move) {
+            uint16_t next_p = perm_next[move][p];
+            uint16_t next_o = ori_next[move][o];
+            if (next_p >= PERMUTATIONS || next_o >= ORIENTATIONS)
+                return 0;
+            if (perm_next[inverse_move[move]][next_p] != p ||
+                ori_next[inverse_move[move]][next_o] != o)
+                return 0;
+            state_t next = apply_move(state, move);
+            if (rank_state(&next) !=
+                (uint32_t) next_p * ORIENTATIONS + next_o)
+                return 0;
+        }
     }
     return 1;
 }
@@ -322,6 +362,7 @@ int main(int argc, char **argv)
     state_t state;
     uint8_t diameter;
     if (argc == 2 && !strcmp(argv[1], "--self-test")) {
+        build_coordinate_tables();
         if (!self_test()) {
             fputs("self-test failed\n", stderr);
             return 1;
