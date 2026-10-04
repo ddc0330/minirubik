@@ -314,21 +314,20 @@ static uint8_t coordinate_heuristic(uint16_t p, uint16_t o)
     return perm_dist[p] > ori_dist[o] ? perm_dist[p] : ori_dist[o];
 }
 
-/* Return success only when a solution fits in the remaining depth.
+/* Entry requires coordinate_heuristic(p, o) <= remaining: the root bound
+ * and the parent check establish this. Pruned children need no recursive call.
+ * Return success only when a solution fits in the remaining depth.
  * path is written on successful unwinding, so failed branches leave it alone.
  */
 static int ida_search(uint16_t p, uint16_t o, uint8_t remaining,
                       uint8_t previous_face, uint8_t depth, uint8_t *path)
 {
-    if (coordinate_heuristic(p, o) > remaining) {
-        COUNT(heuristic_prunes);
-        return 0;
-    }
     if (p == 0 && o == 0)
         return 1;
     if (remaining == 0)
         return 0;
     COUNT(expanded);
+    uint8_t child_remaining = (uint8_t) (remaining - 1U);
     for (uint8_t face = 0; face < 3; ++face) {
         if (face == previous_face)
             continue;
@@ -336,8 +335,13 @@ static int ida_search(uint16_t p, uint16_t o, uint8_t remaining,
         for (uint8_t turn = 0; turn < 3; ++turn) {
             uint8_t move = (uint8_t) (first_move + turn);
             COUNT(generated);
-            if (ida_search(perm_next[move][p], ori_next[move][o],
-                           (uint8_t) (remaining - 1U), face,
+            uint16_t next_p = perm_next[move][p];
+            uint16_t next_o = ori_next[move][o];
+            if (coordinate_heuristic(next_p, next_o) > child_remaining) {
+                COUNT(heuristic_prunes);
+                continue;
+            }
+            if (ida_search(next_p, next_o, child_remaining, face,
                            (uint8_t) (depth + 1U), path)) {
                 path[depth] = move;
                 return 1;
