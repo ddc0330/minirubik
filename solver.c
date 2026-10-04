@@ -2,6 +2,27 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef SOLVER_STATS
+#include <inttypes.h>
+typedef struct {
+    uint64_t generated, expanded, heuristic_prunes;
+    unsigned iterations;
+    int solution_depth;
+} search_stats_t;
+static search_stats_t search_stats;
+#define COUNT(field) (++search_stats.field)
+static void report_stats(uint32_t rank)
+{
+    fprintf(stderr, "rank=%" PRIu32 " generated=%" PRIu64
+            " expanded=%" PRIu64 " heuristic_prunes=%" PRIu64
+            " iterations=%u solution_depth=%d\n", rank,
+            search_stats.generated, search_stats.expanded,
+            search_stats.heuristic_prunes, search_stats.iterations,
+            search_stats.solution_depth);
+}
+#else
+#define COUNT(field) ((void) 0)
+#endif
 
 enum {
     CUBIES = 7,
@@ -27,7 +48,9 @@ typedef struct {
 
 static const char *const move_names[MOVES] = {"R",  "R2", "R'", "B", "B2",
                                               "B'", "D",  "D2", "D'"};
+#ifdef SOLVER_HOST_VERIFY
 static const uint8_t inverse_move[MOVES] = {2, 1, 0, 5, 4, 3, 8, 7, 6};
+#endif
 /* Each destination takes a cubie from source[face][destination]. */
 static const uint8_t source[3][CUBIES] = {
     {1, 4, 2, 0, 3, 5, 6},
@@ -257,6 +280,7 @@ static int build_heuristic_tables(void)
     return tail == ORIENTATIONS;
 }
 
+#ifdef SOLVER_HOST_VERIFY
 static int check_heuristic_tables(void)
 {
     if (perm_dist[0] != 0 || ori_dist[0] != 0)
@@ -283,6 +307,7 @@ static int check_heuristic_tables(void)
     }
     return 1;
 }
+#endif
 
 static uint8_t coordinate_heuristic(uint16_t p, uint16_t o)
 {
@@ -295,16 +320,20 @@ static uint8_t coordinate_heuristic(uint16_t p, uint16_t o)
 static int ida_search(uint16_t p, uint16_t o, uint8_t remaining,
                       uint8_t previous_face, uint8_t depth, uint8_t *path)
 {
-    if (coordinate_heuristic(p, o) > remaining)
+    if (coordinate_heuristic(p, o) > remaining) {
+        COUNT(heuristic_prunes);
         return 0;
+    }
     if (p == 0 && o == 0)
         return 1;
     if (remaining == 0)
         return 0;
+    COUNT(expanded);
     for (uint8_t move = 0; move < MOVES; ++move) {
         uint8_t face = (uint8_t) (move / 3U);
         if (face == previous_face)
             continue;
+        COUNT(generated);
         if (ida_search(perm_next[move][p], ori_next[move][o],
                        (uint8_t) (remaining - 1U), face,
                        (uint8_t) (depth + 1U), path)) {
@@ -320,14 +349,27 @@ static int ida_search(uint16_t p, uint16_t o, uint8_t remaining,
  */
 static int solve_coordinates(uint16_t p, uint16_t o, uint8_t *path)
 {
+#ifdef SOLVER_STATS
+    memset(&search_stats, 0, sizeof search_stats);
+    search_stats.solution_depth = -1;
+#endif
     for (uint8_t bound = coordinate_heuristic(p, o);
          bound <= MAX_DEPTH; ++bound) {
-        if (ida_search(p, o, bound, 3, 0, path))
+        COUNT(iterations);
+        if (ida_search(p, o, bound, 3, 0, path)) {
+#ifdef SOLVER_STATS
+            search_stats.solution_depth = bound;
+#endif
             return bound;
+        }
     }
     return -1;
 }
 
+#ifdef SOLVER_HOST_VERIFY
+/* Independent baseline BFS: retain its quarter-turn construction, but store
+ * exact distances instead of the original moves toward solved. Host only.
+ */
 static uint8_t *build_table(uint8_t *diameter)
 {
     uint8_t *toward_solved = malloc(STATES);
@@ -375,8 +417,8 @@ static uint8_t *build_table(uint8_t *diameter)
                 next_o = orientation[face][next_o];
                 uint32_t there = (uint32_t) next_p * ORIENTATIONS + next_o;
                 if (toward_solved[there] == UINT8_MAX) {
-                    uint8_t move = (uint8_t) (face * 3U + turn);
-                    toward_solved[there] = inverse_move[move];
+                    toward_solved[there] =
+                        (uint8_t) (toward_solved[here] + 1U);
                     queue[tail++] = there;
                 }
             }
@@ -389,6 +431,7 @@ static uint8_t *build_table(uint8_t *diameter)
     }
     return toward_solved;
 }
+#endif
 
 /*@ requires valid_read_string(input);
     requires \valid(state);
@@ -438,6 +481,7 @@ static int output_failed(void)
     return fflush(stdout) != 0 || ferror(stdout);
 }
 
+#ifdef SOLVER_HOST_VERIFY
 static int self_test(void)
 {
     const state_t solved = {{0, 1, 2, 3, 4, 5, 6}, {0}};
@@ -472,9 +516,63 @@ static int self_test(void)
     return 1;
 }
 
+static int check_solution(uint32_t rank, uint8_t distance)
+{
+    uint8_t path[MAX_DEPTH];
+    int length = solve_coordinates((uint16_t) (rank / ORIENTATIONS),
+                                   (uint16_t) (rank % ORIENTATIONS), path);
+#ifdef SOLVER_STATS
+    report_stats(rank);
+#endif
+    if (length != distance)
+        return 0;
+    state_t state;
+    unrank_state(rank, &state);
+    for (int i = 0; i < length; ++i) {
+        if (path[i] >= MOVES ||
+            (i != 0 && path[i] / 3U == path[i - 1] / 3U))
+            return 0;
+        state = apply_move(state, path[i]);
+    }
+    return rank_state(&state) == 0;
+}
+
+static int check_baseline(const uint8_t *distance)
+{
+    unsigned hardest = 0;
+    if (distance[0] != 0)
+        return 0;
+    for (uint32_t rank = 0; rank < STATES; ++rank) {
+        uint16_t p = (uint16_t) (rank / ORIENTATIONS);
+        uint16_t o = (uint16_t) (rank % ORIENTATIONS);
+        if (distance[rank] > MAX_DEPTH ||
+            coordinate_heuristic(p, o) > distance[rank]) {
+            fprintf(stderr, "admissibility/BFS check failed at rank %u\n",
+                    (unsigned) rank);
+            return 0;
+        }
+        if (distance[rank] == MAX_DEPTH) {
+            ++hardest;
+            if (!check_solution(rank, distance[rank])) {
+                fprintf(stderr, "solution check failed at rank %u\n",
+                        (unsigned) rank);
+                return 0;
+            }
+        }
+    }
+    state_t vector;
+    if (hardest != 2644 || !check_solution(0, 0) ||
+        !parse_state("21345671111111", &vector))
+        return 0;
+    uint32_t rank = rank_state(&vector);
+    return check_solution(rank, distance[rank]);
+}
+#endif
+
 int main(int argc, char **argv)
 {
     state_t state;
+#ifdef SOLVER_HOST_VERIFY
     uint8_t diameter;
     if (argc == 2 && !strcmp(argv[1], "--self-test")) {
         build_coordinate_tables();
@@ -491,14 +589,17 @@ int main(int argc, char **argv)
             fputs("could not build complete state table\n", stderr);
             return 1;
         }
-        free(table);
-        if (diameter != 11) {
+        if (diameter != MAX_DEPTH || !check_baseline(table)) {
+            free(table);
             fputs("BFS check failed\n", stderr);
             return 1;
         }
-        puts("3674160 states; diameter 11");
+        free(table);
+        puts("3674160 states; diameter 11; admissibility checked; "
+             "2644 distance-11 solutions and test vector verified");
         return output_failed();
     }
+#endif
     if (argc != 2 || !parse_state(argv[1], &state)) {
         /* C99 5.1.2.2.1 lets argv[0] be null when argc is 0. */
         fprintf(stderr, "usage: %s PPPPPPPOOOOOOO\n",
@@ -514,6 +615,9 @@ int main(int argc, char **argv)
     uint32_t rank = rank_state(&state);
     int length = solve_coordinates((uint16_t) (rank / ORIENTATIONS),
                                    (uint16_t) (rank % ORIENTATIONS), path);
+#ifdef SOLVER_STATS
+    report_stats(rank);
+#endif
     if (length < 0) {
         fputs("IDA* search failed\n", stderr);
         return 1;
