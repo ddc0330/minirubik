@@ -3,3 +3,7 @@
 *.swp
 solver
 mini
+
+# RV32 build artifacts
+*.o
+*.elf
