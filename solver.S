@@ -59,6 +59,12 @@ cube_input_end:
 
 _start:
 
+    /* Cache immutable table base addresses. */
+    la      s8,  perm_next
+    la      s9,  ori_next
+    la      s10, perm_dist
+    la      s11, ori_dist
+
     /* Rank input */
     la      a0, cube_input
     call    rank_input
@@ -296,8 +302,7 @@ next_coordinates:
     slli    t2, a2, 1          /* move * 2 */
     add     t0, t0, t2
 
-    la      t1, perm_next
-    add     t0, t0, t1
+    add     t0, t0, s8
 
     lhu     t3, 0(t0)          /* next_p */
 
@@ -315,8 +320,7 @@ next_coordinates:
     slli    t2, a2, 1          /* move * 2 */
     add     t0, t0, t2
 
-    la      t1, ori_next
-    add     t0, t0, t1
+    add     t0, t0, s9
 
     lhu     a1, 0(t0)          /* next_o */
 
@@ -345,15 +349,13 @@ coordinate_heuristic:
 
     /* perm_dist[p] */
 
-    la      t0, perm_dist
-    add     t0, t0, a0
+    add     t0, s10, a0
     lbu     t1, 0(t0)
 
 
     /* ori_dist[o] */
 
-    la      t0, ori_dist
-    add     t0, t0, a1
+    add     t0, s11, a1
     lbu     t2, 0(t0)
 
 
@@ -512,8 +514,7 @@ ida_search_iterative:
     slli    t6, t1, 1
     add     t5, t5, t6
 
-    la      t6, perm_next
-    add     t5, t5, t6
+    add     t5, t5, s8
 
     lhu     t3, 0(t5)          /* next_p */
 
@@ -529,8 +530,7 @@ ida_search_iterative:
     slli    t6, t1, 1
     add     t5, t5, t6
 
-    la      t6, ori_next
-    add     t5, t5, t6
+    add     t5, t5, s9
 
     lhu     t4, 0(t5)          /* next_o */
 
@@ -550,15 +550,13 @@ ida_search_iterative:
      * prune if either component is > child_remaining.
      * ------------------------------------------------------------ */
 
-    la      t6, perm_dist
-    add     t6, t6, t3
+    add     t6, s10, t3
     lbu     a4, 0(t6)
 
     bltu    t5, a4, .Lida_loop
 
 
-    la      t6, ori_dist
-    add     t6, t6, t4
+    add     t6, s11, t4
     lbu     a5, 0(t6)
 
     bltu    t5, a5, .Lida_loop
