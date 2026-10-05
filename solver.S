@@ -1,5 +1,9 @@
     .equ RENDER, 0
 
+    .if RENDER
+    .include "ripes_led.inc"
+    .endif
+
     .equ MAX_DEPTH, 11
     
     .equ MOVES, 9
@@ -100,6 +104,23 @@ _start:
     /* Save verification result */
     la      t0, verification_result
     sw      a0, 0(t0)
+
+.if RENDER
+    /*
+     * Animate only a verified solution.
+     *
+     * a0 = solution_path
+     * a1 = solution_length
+     */
+    beqz    a0, .Lstart_exit
+
+    la      a0, solution_path
+
+    la      t0, solution_length
+    lw      a1, 0(t0)
+
+    call    render_solution
+.endif
 
     j       .Lstart_exit
 
@@ -347,13 +368,8 @@ next_coordinates:
 
 coordinate_heuristic:
 
-    /* perm_dist[p] */
-
     add     t0, s10, a0
     lbu     t1, 0(t0)
-
-
-    /* ori_dist[o] */
 
     add     t0, s11, a1
     lbu     t2, 0(t0)
@@ -771,7 +787,7 @@ solve_coordinates:
     addi    sp, sp, 32
 
     ret
-
+    .size solve_coordinates, . - solve_coordinates
         /* ============================================================
      * verify_solution
      *
@@ -867,7 +883,892 @@ verify_solution:
     ret
 
     .size verify_solution, . - verify_solution
-    .size solve_coordinates, . - solve_coordinates
+.if RENDER
+
+    .equ GRID_COLOR, 0x404040
+    /* ============================================================
+     * LED Matrix visualization
+     *
+     * Matrix:
+     *   35 x 25
+     *
+     * Face order:
+     *
+     *   0 = U  white
+     *   1 = L  orange
+     *   2 = F  green
+     *   3 = R  red
+     *   4 = B  blue
+     *   5 = D  yellow
+     *
+     * Each face consists of four 4 x 3 pixel facelets.
+     * Therefore each complete face occupies 8 x 6 pixels.
+     * ============================================================ */
+
+    .section .rodata
+    .balign 4
+
+
+    /* ------------------------------------------------------------
+     * RGB palette
+     * ------------------------------------------------------------ */
+
+led_palette:
+
+    .word   0xFFFFFF           /* U: white  */
+    .word   0xFF8000           /* L: orange */
+    .word   0x00FF00           /* F: green  */
+    .word   0xFF0000           /* R: red    */
+    .word   0x0000FF           /* B: blue   */
+    .word   0xFFFF00           /* D: yellow */
+
+
+    /* ------------------------------------------------------------
+     * Top-left pixel of each 8 x 6 face.
+     *
+     *             U
+     *
+     *       L     F     R     B
+     *
+     *             D
+     * ------------------------------------------------------------ */
+
+face_origin_x:
+    .byte   10, 2, 10, 18, 26, 10
+
+face_origin_y:
+    .byte   1, 9, 9, 9, 9, 17
+
+
+    /* ------------------------------------------------------------
+     * inverse move
+     *
+     * solver encoding:
+     *
+     * 0 R    1 R2    2 R'
+     * 3 B    4 B2    5 B'
+     * 6 D    7 D2    8 D'
+     * ------------------------------------------------------------ */
+
+inverse_visual_move:
+    .byte   2, 1, 0
+    .byte   5, 4, 3
+    .byte   8, 7, 6
+
+
+    /* ------------------------------------------------------------
+     * Quarter-turn facelet permutations
+     *
+     * Facelet numbering:
+     *
+     * U =  0..3
+     * L =  4..7
+     * F =  8..11
+     * R = 12..15
+     * B = 16..19
+     * D = 20..23
+     *
+     * Within one face:
+     *
+     *       0 1
+     *       2 3
+     *
+     * Entry i gives the old facelet copied to new facelet i.
+     *
+     * Three rows:
+     *   row 0 = R
+     *   row 1 = B
+     *   row 2 = D
+     * ------------------------------------------------------------ */
+
+visual_quarter_map:
+
+    /* R */
+    .byte   0, 9, 2, 11
+    .byte   4, 5, 6, 7
+    .byte   8, 21, 10, 23
+    .byte   14, 12, 15, 13
+    .byte   3, 17, 1, 19
+    .byte   20, 18, 22, 16
+
+    /* B */
+    .byte   13, 15, 2, 3
+    .byte   1, 5, 0, 7
+    .byte   8, 9, 10, 11
+    .byte   12, 23, 14, 22
+    .byte   18, 16, 19, 17
+    .byte   20, 21, 4, 6
+
+    /* D */
+    .byte   0, 1, 2, 3
+    .byte   4, 5, 18, 19
+    .byte   8, 9, 6, 7
+    .byte   12, 13, 10, 11
+    .byte   16, 17, 14, 15
+    .byte   22, 20, 23, 21
+
+
+    /* ============================================================
+     * render_solution
+     *
+     * a0 = solution_path
+     * a1 = solution_length
+     *
+     * Procedure:
+     *
+     * 1. Start from a solved visual cube.
+     * 2. Walk solution_path backwards using inverse moves.
+     *    This reconstructs the input state.
+     * 3. Draw the reconstructed input.
+     * 4. Replay the real solver path forwards.
+     * 5. Redraw after every move.
+     * ============================================================ */
+
+    .section .text
+    .balign 4
+
+    .type render_solution, @function
+
+render_solution:
+
+    addi    sp, sp, -16
+
+    sw      s0, 0(sp)
+    sw      s1, 4(sp)
+    sw      s2, 8(sp)
+    sw      ra, 12(sp)
+
+    mv      s0, a0             /* path */
+    mv      s1, a1             /* length */
+
+
+    /* Begin from the solved visual cube. */
+
+    call    init_solved_facelets
+
+
+    /* ------------------------------------------------------------
+     * Reconstruct the initial scrambled state.
+     *
+     * Start at solved and apply inverse moves in reverse order.
+     * ------------------------------------------------------------ */
+
+    mv      s2, s1
+
+
+.Lrender_reconstruct:
+
+    beqz    s2, .Lrender_initial_ready
+
+    addi    s2, s2, -1
+
+    add     t0, s0, s2
+    lbu     t1, 0(t0)          /* solution_path[s2] */
+
+    la      t2, inverse_visual_move
+    add     t2, t2, t1
+    lbu     a0, 0(t2)          /* inverse move */
+
+    call    apply_visual_move
+
+    j       .Lrender_reconstruct
+
+
+.Lrender_initial_ready:
+
+    /*
+     * Matrix is cleared once.
+     *
+     * All later frames overwrite all 24 facelets, so separators
+     * remain black without clearing the matrix again.
+     */
+
+    call    clear_led_matrix
+
+    /*
+     * Draw the six permanent 7 x 7 gray cube-face frames.
+     * Colored 2 x 2 facelets are drawn on top.
+     */
+    call    draw_cube_grid
+
+    call    draw_visual_cube
+    call    render_delay
+
+
+    /* ------------------------------------------------------------
+     * Replay the actual solution generated by the solver.
+     * ------------------------------------------------------------ */
+
+    li      s2, 0
+
+
+.Lrender_forward:
+
+    bgeu    s2, s1, .Lrender_solution_done
+
+    add     t0, s0, s2
+    lbu     a0, 0(t0)
+
+    call    apply_visual_move
+
+    /*
+     * Requirement:
+     * redraw after every move emitted by the solver.
+     */
+
+    call    draw_visual_cube
+    call    render_delay
+
+    addi    s2, s2, 1
+    j       .Lrender_forward
+
+
+.Lrender_solution_done:
+
+    lw      ra, 12(sp)
+    lw      s2, 8(sp)
+    lw      s1, 4(sp)
+    lw      s0, 0(sp)
+
+    addi    sp, sp, 16
+
+    ret
+
+    .size render_solution, . - render_solution
+
+
+    /* ============================================================
+     * init_solved_facelets
+     *
+     * visual_facelets contains one byte per facelet.
+     *
+     * Solved:
+     *
+     *   0 0 0 0       U
+     *   1 1 1 1       L
+     *   2 2 2 2       F
+     *   3 3 3 3       R
+     *   4 4 4 4       B
+     *   5 5 5 5       D
+     * ============================================================ */
+
+    .type init_solved_facelets, @function
+
+init_solved_facelets:
+
+    la      t0, visual_facelets
+
+    li      t1, 0              /* color / face */
+
+
+.Linit_face:
+
+    li      t2, 6
+    bgeu    t1, t2, .Linit_done
+
+    li      t2, 4
+
+
+.Linit_sticker:
+
+    beqz    t2, .Linit_next_face
+
+    sb      t1, 0(t0)
+
+    addi    t0, t0, 1
+    addi    t2, t2, -1
+
+    j       .Linit_sticker
+
+
+.Linit_next_face:
+
+    addi    t1, t1, 1
+    j       .Linit_face
+
+
+.Linit_done:
+
+    ret
+
+    .size init_solved_facelets, . - init_solved_facelets
+
+
+    /* ============================================================
+     * apply_visual_move
+     *
+     * a0 = move 0..8
+     *
+     * Move encoding:
+     *
+     * 0 R    1 R2    2 R'
+     * 3 B    4 B2    5 B'
+     * 6 D    7 D2    8 D'
+     *
+     * A prime move is implemented as three quarter turns.
+     * ============================================================ */
+
+    .type apply_visual_move, @function
+
+apply_visual_move:
+
+    addi    sp, sp, -16
+
+    sw      s0, 4(sp)
+    sw      s1, 8(sp)
+    sw      ra, 12(sp)
+
+
+    /* Determine face and number of quarter turns. */
+
+    li      t0, 3
+    bltu    a0, t0, .Lvisual_move_r
+
+    li      t0, 6
+    bltu    a0, t0, .Lvisual_move_b
+
+
+    /* D / D2 / D' */
+
+    li      s0, 2              /* quarter-map row D */
+    addi    s1, a0, -5         /* 6->1, 7->2, 8->3 */
+
+    j       .Lvisual_turn_loop
+
+
+.Lvisual_move_r:
+
+    li      s0, 0              /* quarter-map row R */
+    addi    s1, a0, 1          /* 0->1, 1->2, 2->3 */
+
+    j       .Lvisual_turn_loop
+
+
+.Lvisual_move_b:
+
+    li      s0, 1              /* quarter-map row B */
+    addi    s1, a0, -2         /* 3->1, 4->2, 5->3 */
+
+
+.Lvisual_turn_loop:
+
+    beqz    s1, .Lvisual_move_done
+
+    mv      a0, s0
+    call    apply_visual_quarter
+
+    addi    s1, s1, -1
+    j       .Lvisual_turn_loop
+
+
+.Lvisual_move_done:
+
+    lw      ra, 12(sp)
+    lw      s1, 8(sp)
+    lw      s0, 4(sp)
+
+    addi    sp, sp, 16
+
+    ret
+
+    .size apply_visual_move, . - apply_visual_move
+
+
+    /* ============================================================
+     * apply_visual_quarter
+     *
+     * a0 = 0 R
+     *      1 B
+     *      2 D
+     *
+     * new[i] = old[visual_quarter_map[face][i]]
+     * ============================================================ */
+
+    .type apply_visual_quarter, @function
+
+apply_visual_quarter:
+
+    /*
+     * table row offset = face * 24
+     *
+     * 24 = 16 + 8
+     */
+
+    slli    t0, a0, 4
+    slli    t1, a0, 3
+    add     t0, t0, t1
+
+    la      t1, visual_quarter_map
+    add     t0, t0, t1        /* map row */
+
+    la      t1, visual_facelets
+    la      t2, visual_tmp
+
+    li      t3, 0
+
+
+.Lvisual_quarter_build:
+
+    li      t4, 24
+    bgeu    t3, t4, .Lvisual_quarter_copy
+
+    /*
+     * source index for new facelet t3
+     */
+
+    add     t4, t0, t3
+    lbu     t4, 0(t4)
+
+    add     t5, t1, t4
+    lbu     t6, 0(t5)
+
+    add     t5, t2, t3
+    sb      t6, 0(t5)
+
+    addi    t3, t3, 1
+    j       .Lvisual_quarter_build
+
+
+.Lvisual_quarter_copy:
+
+    li      t3, 0
+
+
+.Lvisual_quarter_copy_loop:
+
+    li      t4, 24
+    bgeu    t3, t4, .Lvisual_quarter_done
+
+    add     t4, t2, t3
+    lbu     t5, 0(t4)
+
+    add     t4, t1, t3
+    sb      t5, 0(t4)
+
+    addi    t3, t3, 1
+    j       .Lvisual_quarter_copy_loop
+
+
+.Lvisual_quarter_done:
+
+    ret
+
+    .size apply_visual_quarter, . - apply_visual_quarter
+
+
+    /* ============================================================
+     * draw_cube_grid
+     *
+     * Draw six 7 x 7 dark-gray face backgrounds.
+     *
+     * The four 2 x 2 colored facelets are later drawn on top,
+     * leaving a one-pixel gray border and central grid.
+     * ============================================================ */
+
+    .type draw_cube_grid, @function
+
+draw_cube_grid:
+
+    addi    sp, sp, -16
+
+    sw      s0, 8(sp)
+    sw      ra, 12(sp)
+
+    li      s0, 0
+
+
+.Lgrid_face_loop:
+
+    li      t0, 6
+    bgeu    s0, t0, .Lgrid_done
+
+    la      t0, face_origin_x
+    add     t0, t0, s0
+    lbu     a0, 0(t0)
+
+    la      t0, face_origin_y
+    add     t0, t0, s0
+    lbu     a1, 0(t0)
+
+    li      a2, GRID_COLOR
+
+    call    draw_face_background
+
+    addi    s0, s0, 1
+    j       .Lgrid_face_loop
+
+
+.Lgrid_done:
+
+    lw      ra, 12(sp)
+    lw      s0, 8(sp)
+
+    addi    sp, sp, 16
+
+    ret
+
+    .size draw_cube_grid, . - draw_cube_grid
+
+
+    /* ============================================================
+     * draw_face_background
+     *
+     * a0 = top-left x
+     * a1 = top-left y
+     * a2 = RGB color
+     *
+     * Draw one solid 7 x 7 square.
+     * ============================================================ */
+
+    .type draw_face_background, @function
+
+draw_face_background:
+
+    slli    t0, a1, 7
+    slli    t1, a1, 3
+    add     t0, t0, t1
+
+    slli    t1, a1, 2
+    add     t0, t0, t1
+
+    slli    t1, a0, 2
+    add     t0, t0, t1
+
+    li      t1, LED_MATRIX_0_BASE
+    add     t0, t0, t1
+
+    li      t1, LED_MATRIX_0_WIDTH
+    slli    t1, t1, 2
+
+    li      t2, 7
+
+
+.Lface_bg_row:
+
+    beqz    t2, .Lface_bg_done
+
+    mv      t3, t0
+    li      t4, 7
+
+
+.Lface_bg_column:
+
+    beqz    t4, .Lface_bg_next_row
+
+    sw      a2, 0(t3)
+
+    addi    t3, t3, 4
+    addi    t4, t4, -1
+
+    j       .Lface_bg_column
+
+
+.Lface_bg_next_row:
+
+    add     t0, t0, t1
+
+    addi    t2, t2, -1
+    j       .Lface_bg_row
+
+
+.Lface_bg_done:
+
+    ret
+
+    .size draw_face_background, . - draw_face_background
+
+
+    /* ============================================================
+     * draw_visual_cube
+     *
+     * Draw all 24 facelets.
+     * ============================================================ */
+
+    .type draw_visual_cube, @function
+
+draw_visual_cube:
+
+    addi    sp, sp, -32
+
+    sw      s0, 8(sp)
+    sw      s1, 12(sp)
+    sw      s2, 16(sp)
+    sw      s3, 20(sp)
+    sw      s4, 24(sp)
+    sw      ra, 28(sp)
+
+
+    li      s0, 0              /* face */
+
+    la      s2, visual_facelets
+
+
+.Ldraw_cube_face:
+
+    li      t0, 6
+    bgeu    s0, t0, .Ldraw_cube_done
+
+
+    /* origin x */
+
+    la      t0, face_origin_x
+    add     t0, t0, s0
+    lbu     s3, 0(t0)
+
+
+    /* origin y */
+
+    la      t0, face_origin_y
+    add     t0, t0, s0
+    lbu     s4, 0(t0)
+
+
+    li      s1, 0              /* local facelet 0..3 */
+
+
+.Ldraw_cube_facelet:
+
+    li      t0, 4
+    bgeu    s1, t0, .Ldraw_cube_next_face
+
+
+    /* ------------------------------------------------------------
+     * Load RGB corresponding to this facelet's current color.
+     * ------------------------------------------------------------ */
+
+    lbu     t0, 0(s2)
+    addi    s2, s2, 1
+
+    la      t1, led_palette
+    slli    t0, t0, 2
+    add     t1, t1, t0
+
+    lw      a2, 0(t1)
+
+
+        /* ------------------------------------------------------------
+     * Colored facelet positions inside a 7 x 7 face:
+     *
+     *   #######
+     *   #00#11#
+     *   #00#11#
+     *   #######
+     *   #22#33#
+     *   #22#33#
+     *   #######
+     *
+     * x = origin_x + 1 + column * 3
+     * y = origin_y + 1 + row    * 3
+     * ------------------------------------------------------------ */
+
+
+    /* column = facelet & 1 */
+
+    andi    t0, s1, 1
+
+    /* column * 3 */
+
+    slli    t1, t0, 1
+    add     t0, t0, t1
+
+    add     a0, s3, t0
+    addi    a0, a0, 1
+
+
+    /* row = facelet >> 1 */
+
+    srli    t0, s1, 1
+
+    /* row * 3 */
+
+    slli    t1, t0, 1
+    add     t0, t0, t1
+
+    add     a1, s4, t0
+    addi    a1, a1, 1
+
+
+    call    draw_facelet
+
+
+    addi    s1, s1, 1
+    j       .Ldraw_cube_facelet
+
+
+.Ldraw_cube_next_face:
+
+    addi    s0, s0, 1
+    j       .Ldraw_cube_face
+
+
+.Ldraw_cube_done:
+
+    lw      ra, 28(sp)
+    lw      s4, 24(sp)
+    lw      s3, 20(sp)
+    lw      s2, 16(sp)
+    lw      s1, 12(sp)
+    lw      s0, 8(sp)
+
+    addi    sp, sp, 32
+
+    ret
+
+    .size draw_visual_cube, . - draw_visual_cube
+
+
+    /* ============================================================
+     * draw_facelet
+     *
+     * a0 = x
+     * a1 = y
+     * a2 = RGB
+     *
+     * Draw one 4 x 3 facelet.
+     *
+     * LED address:
+     *
+     * BASE + (y * WIDTH + x) * 4
+     *
+     * WIDTH = 35
+     * row stride = 35 * 4 = 140 bytes
+     * ============================================================ */
+
+    .type draw_facelet, @function
+
+draw_facelet:
+
+    /*
+     * y * 140
+     *
+     * 140 = 128 + 8 + 4
+     */
+
+    slli    t0, a1, 7          /* y * 128 */
+    slli    t1, a1, 3          /* y * 8 */
+
+    add     t0, t0, t1
+
+    slli    t1, a1, 2          /* y * 4 */
+    add     t0, t0, t1        /* y * 140 */
+
+
+    /* x * 4 */
+
+    slli    t1, a0, 2
+    add     t0, t0, t1
+
+
+    /* BASE + byte offset */
+
+    li      t1, LED_MATRIX_0_BASE
+    add     t0, t0, t1
+
+
+    /* row stride = WIDTH * 4 */
+
+    li      t1, LED_MATRIX_0_WIDTH
+    slli    t1, t1, 2
+
+
+    /* Two pixel rows per facelet. */
+
+    li      t2, 2
+
+.Ldraw_facelet_row:
+
+    beqz    t2, .Ldraw_facelet_done
+
+    mv      t3, t0
+    li      t4, 2
+
+
+.Ldraw_facelet_column:
+
+    beqz    t4, .Ldraw_facelet_next_row
+
+    sw      a2, 0(t3)
+
+    addi    t3, t3, 4
+    addi    t4, t4, -1
+
+    j       .Ldraw_facelet_column
+
+
+.Ldraw_facelet_next_row:
+
+    add     t0, t0, t1
+
+    addi    t2, t2, -1
+    j       .Ldraw_facelet_row
+
+
+.Ldraw_facelet_done:
+
+    ret
+
+    .size draw_facelet, . - draw_facelet
+
+
+    /* ============================================================
+     * clear_led_matrix
+     *
+     * The entire peripheral register range is contiguous.
+     * ============================================================ */
+
+    .type clear_led_matrix, @function
+
+clear_led_matrix:
+
+    li      t0, LED_MATRIX_0_BASE
+
+    li      t1, LED_MATRIX_0_SIZE
+    add     t1, t1, t0
+
+
+.Lclear_matrix_loop:
+
+    bgeu    t0, t1, .Lclear_matrix_done
+
+    sw      zero, 0(t0)
+
+    addi    t0, t0, 4
+    j       .Lclear_matrix_loop
+
+
+.Lclear_matrix_done:
+
+    ret
+
+    .size clear_led_matrix, . - clear_led_matrix
+
+
+    /* ============================================================
+     * render_delay
+     *
+     * Delay only exists in the GUI renderer.
+     *
+     * Adjust this constant if the animation is too fast or slow.
+     * ============================================================ */
+
+    .type render_delay, @function
+
+render_delay:
+
+    li      t0, 3000000
+
+
+.Lrender_delay_loop:
+
+    addi    t0, t0, -1
+    bnez    t0, .Lrender_delay_loop
+
+    ret
+
+    .size render_delay, . - render_delay
+
+.endif
+
     .section .bss
     .balign 4
 
@@ -878,8 +1779,20 @@ solution_length:
     .globl solution_path
 solution_path:
     .space MAX_DEPTH
+
     .balign 4
 
     .globl verification_result
 verification_result:
     .space 4
+    .if RENDER
+
+    .balign 4
+
+visual_facelets:
+    .space 24
+
+visual_tmp:
+    .space 24
+
+.endif
