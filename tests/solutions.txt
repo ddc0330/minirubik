@@ -1,8 +1,9 @@
 # Optimal solutions, one "state|solution" pair per line, consumed by "make check".
 # Every pair was verified against an independent model of source[][] and twist[][]:
 # the moves solve the state, and the move count equals the true BFS distance.
-# Depths covered: 0, 8, 8, 8, 9, 9, 10, 11.
+# Depths covered: 0, 1, 8, 8, 8, 9, 9, 10, 11.
 12345671111111|
+25314672313211|R'
 62345713133111|R2 D B2 R' D R' D B'
 24316572122213|R' D' R2 B D' B2 D' R2
 25713642221111|R B2 R' D2 B R B2 R'
