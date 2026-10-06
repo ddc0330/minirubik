@@ -1,0 +1,4 @@
+﻿Run,Processor,RetiredInstructions,ExecutionTimeMs
+1,RV32_5S,3000005,9166
+2,RV32_5S,3000005,9191
+3,RV32_5S,3000005,9287
