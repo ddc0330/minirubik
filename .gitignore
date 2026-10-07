@@ -7,3 +7,10 @@ mini
 # RV32 build artifacts
 *.o
 *.elf
+
+# Local C test binaries
+/solver_c
+/solver_stats
+/solver_verify
+/solver_iterative
+/solver_iterative_stats
